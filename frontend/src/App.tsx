@@ -243,6 +243,23 @@ function App() {
     }
   }
 
+  async function handleKill() {
+    if (!selectedScript) {
+      return
+    }
+
+    setActioning(true)
+    setError('')
+    try {
+      await fetchJson(`/api/scripts/${selectedScript.id}/kill`, { method: 'POST' })
+      await loadScripts()
+    } catch (err) {
+      setError((err as Error).message)
+    } finally {
+      setActioning(false)
+    }
+  }
+
   async function handleDelete() {
     if (!selectedScript || !window.confirm(`确认删除脚本“${selectedScript.name}”吗？`)) {
       return
@@ -363,6 +380,11 @@ function App() {
                   <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5 }}>
                     当前按 Shell 脚本方式执行，脚本会使用 bash 在指定目录中运行。
                   </Typography>
+                  {selectedScript?.status === 'running' ? (
+                    <Typography variant="body2" color="warning.main" sx={{ mt: 0.5 }}>
+                      脚本正在运行，当前保存的修改会在下次启动时生效。
+                    </Typography>
+                  ) : null}
                 </Box>
 
                 <TextField
@@ -417,15 +439,23 @@ function App() {
                     onClick={handleStop}
                     disabled={!selectedScript || actioning || selectedScript.status !== 'running'}
                   >
-                    停止
+                    优雅停止
                   </Button>
                   <Button
                     variant="outlined"
                     color="error"
+                    onClick={handleKill}
+                    disabled={!selectedScript || actioning || selectedScript.status !== 'running'}
+                  >
+                    Kill
+                  </Button>
+                  <Button
+                    variant="outlined"
+                    color="inherit"
                     onClick={handleDelete}
                     disabled={!selectedScript || actioning}
                   >
-                    删除
+                    停止并删除
                   </Button>
                 </Stack>
 

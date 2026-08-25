@@ -326,10 +326,7 @@ func (a *App) updateScript(id string, payload ScriptPayload) (ScriptView, error)
 		a.mu.Unlock()
 		return ScriptView{}, errors.New("脚本不存在")
 	}
-	if item.Status == "running" {
-		a.mu.Unlock()
-		return ScriptView{}, errors.New("请先停止脚本后再修改")
-	}
+	running := item.Status == "running"
 
 	item.Config.Name = validated.Name
 	item.Config.WorkDir = validated.WorkDir
@@ -343,19 +340,22 @@ func (a *App) updateScript(id string, payload ScriptPayload) (ScriptView, error)
 		return ScriptView{}, err
 	}
 
+	if running {
+		a.appendLog(id, "system", "脚本配置已更新，运行中的进程不受影响，重启后生效")
+	}
+
 	return view, nil
 }
 
 func (a *App) deleteScript(id string) error {
+	if _, err := a.stopScriptAndWait(id, true); err != nil && err.Error() != "脚本当前未运行" {
+		return err
+	}
+
 	a.mu.Lock()
-	item, ok := a.scripts[id]
-	if !ok {
+	if _, ok := a.scripts[id]; !ok {
 		a.mu.Unlock()
 		return errors.New("脚本不存在")
-	}
-	if item.Status == "running" {
-		a.mu.Unlock()
-		return errors.New("请先停止脚本后再删除")
 	}
 	delete(a.scripts, id)
 	a.mu.Unlock()
@@ -474,6 +474,9 @@ func (a *App) consumePipe(id, source string, reader io.ReadCloser) {
 	}
 
 	if err := scanner.Err(); err != nil {
+		if strings.Contains(err.Error(), "file already closed") {
+			return
+		}
 		a.appendLog(id, "system", fmt.Sprintf("%s 读取失败: %v", source, err))
 	}
 }
@@ -501,21 +504,27 @@ func (a *App) watchProcess(id string, cmd *exec.Cmd) {
 	a.appendLog(id, "system", "脚本已退出")
 }
 
-func (a *App) stopScript(id string) (ScriptView, error) {
+func (a *App) getRunningProcess(id string) (*exec.Cmd, ScriptView, error) {
 	a.mu.RLock()
+	defer a.mu.RUnlock()
+
 	item, ok := a.scripts[id]
 	if !ok {
-		a.mu.RUnlock()
-		return ScriptView{}, errors.New("脚本不存在")
+		return nil, ScriptView{}, errors.New("脚本不存在")
 	}
 	if item.Status != "running" || item.Cmd == nil || item.Cmd.Process == nil {
 		view := toScriptView(item)
-		a.mu.RUnlock()
-		return view, errors.New("脚本当前未运行")
+		return nil, view, errors.New("脚本当前未运行")
 	}
-	cmd := item.Cmd
-	view := toScriptView(item)
-	a.mu.RUnlock()
+
+	return item.Cmd, toScriptView(item), nil
+}
+
+func (a *App) stopScript(id string) (ScriptView, error) {
+	cmd, view, err := a.getRunningProcess(id)
+	if err != nil {
+		return view, err
+	}
 
 	a.appendLog(id, "system", "收到停止请求")
 
@@ -523,21 +532,67 @@ func (a *App) stopScript(id string) (ScriptView, error) {
 		return view, err
 	}
 
-	go func() {
-		time.Sleep(3 * time.Second)
+	return view, nil
+}
 
+func (a *App) killScript(id string) (ScriptView, error) {
+	cmd, view, err := a.getRunningProcess(id)
+	if err != nil {
+		return view, err
+	}
+
+	a.appendLog(id, "system", "收到强制结束请求")
+	if err := cmd.Process.Kill(); err != nil {
+		return view, err
+	}
+
+	return view, nil
+}
+
+func (a *App) waitUntilStopped(id string, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
 		a.mu.RLock()
-		current, ok := a.scripts[id]
-		if !ok || current.Cmd != cmd || current.Status != "running" || cmd.Process == nil {
-			a.mu.RUnlock()
-			return
-		}
+		item, ok := a.scripts[id]
+		stopped := !ok || item.Status != "running"
 		a.mu.RUnlock()
 
-		if killErr := cmd.Process.Kill(); killErr == nil {
-			a.appendLog(id, "system", "脚本未在超时时间内退出，已强制结束")
+		if stopped {
+			return nil
 		}
-	}()
+		if time.Now().After(deadline) {
+			return errors.New("等待脚本停止超时")
+		}
+
+		<-ticker.C
+	}
+}
+
+func (a *App) stopScriptAndWait(id string, forceAfterTimeout bool) (ScriptView, error) {
+	view, err := a.stopScript(id)
+	if err != nil {
+		return view, err
+	}
+
+	if waitErr := a.waitUntilStopped(id, 3*time.Second); waitErr == nil {
+		return view, nil
+	}
+
+	if !forceAfterTimeout {
+		return view, errors.New("脚本未在超时时间内退出")
+	}
+
+	a.appendLog(id, "system", "脚本未在超时时间内退出，准备强制结束")
+	if _, err := a.killScript(id); err != nil && err.Error() != "脚本当前未运行" {
+		return view, err
+	}
+
+	if err := a.waitUntilStopped(id, 2*time.Second); err != nil {
+		return view, err
+	}
 
 	return view, nil
 }
@@ -681,9 +736,6 @@ func main() {
 				if err.Error() == "脚本不存在" {
 					status = http.StatusNotFound
 				}
-				if err.Error() == "请先停止脚本后再修改" {
-					status = http.StatusConflict
-				}
 				c.JSON(status, gin.H{"error": err.Error()})
 				return
 			}
@@ -697,9 +749,6 @@ func main() {
 				status := http.StatusBadRequest
 				if err.Error() == "脚本不存在" {
 					status = http.StatusNotFound
-				}
-				if err.Error() == "请先停止脚本后再删除" {
-					status = http.StatusConflict
 				}
 				c.JSON(status, gin.H{"error": err.Error()})
 				return
@@ -727,6 +776,23 @@ func main() {
 
 		api.POST("/scripts/:id/stop", func(c *gin.Context) {
 			script, err := app.stopScript(c.Param("id"))
+			if err != nil {
+				status := http.StatusBadRequest
+				if err.Error() == "脚本不存在" {
+					status = http.StatusNotFound
+				}
+				if err.Error() == "脚本当前未运行" {
+					status = http.StatusConflict
+				}
+				c.JSON(status, gin.H{"error": err.Error(), "script": script})
+				return
+			}
+
+			c.JSON(http.StatusOK, gin.H{"script": script})
+		})
+
+		api.POST("/scripts/:id/kill", func(c *gin.Context) {
+			script, err := app.killScript(c.Param("id"))
 			if err != nil {
 				status := http.StatusBadRequest
 				if err.Error() == "脚本不存在" {
