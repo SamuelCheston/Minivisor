@@ -2,10 +2,12 @@ package main
 
 import (
 	"bufio"
+	"embed"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/http"
 	"os"
 	"os/exec"
@@ -18,6 +20,9 @@ import (
 
 	"github.com/gin-gonic/gin"
 )
+
+//go:embed dist/*
+var frontendContent embed.FS
 
 const (
 	configFileName      = "config.json"
@@ -109,7 +114,7 @@ func setupEnvironment() (Config, string, string, error) {
 
 	if _, statErr := os.Stat(configPath); os.IsNotExist(statErr) {
 		defaultConfig := Config{
-			Port: 8080,
+			Port: 7891,
 			Name: "Minivisor Service",
 		}
 		data, marshalErr := json.MarshalIndent(defaultConfig, "", "  ")
@@ -864,6 +869,26 @@ func main() {
 			}
 		})
 	}
+
+	// 静态文件服务 (SPA 支持)
+	staticFS, _ := fs.Sub(frontendContent, "dist")
+	staticServer := http.FileServer(http.FS(staticFS))
+
+	r.NoRoute(func(c *gin.Context) {
+		path := c.Request.URL.Path
+		// 检查文件是否存在于嵌入的 FS 中
+		if _, err := staticFS.Open(strings.TrimPrefix(path, "/")); err == nil {
+			staticServer.ServeHTTP(c.Writer, c.Request)
+			return
+		}
+		// 如果不存在且不是 API 请求，返回 index.html
+		if !strings.HasPrefix(path, "/api") && !strings.HasPrefix(path, "/ping") {
+			c.Request.URL.Path = "/"
+			staticServer.ServeHTTP(c.Writer, c.Request)
+			return
+		}
+		c.JSON(http.StatusNotFound, gin.H{"error": "Not Found"})
+	})
 
 	app.startAutoScripts()
 	address := fmt.Sprintf(":%d", config.Port)
