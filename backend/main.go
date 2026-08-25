@@ -1,12 +1,51 @@
 package main
 
 import (
+	"encoding/json"
+	"fmt"
 	"net/http"
+	"os"
 
 	"github.com/gin-gonic/gin"
 )
 
+type Config struct {
+	Port int    `json:"port"`
+	Name string `json:"name"`
+}
+
+func setup() {
+	const configFile = "config.json"
+	const daemonDir = "./daemons"
+
+	// 检查配置文件
+	if _, err := os.Stat(configFile); os.IsNotExist(err) {
+		fmt.Println("Config file not found, creating default config.json...")
+		defaultConfig := Config{
+			Port: 8080,
+			Name: "Minivisor Service",
+		}
+		data, _ := json.MarshalIndent(defaultConfig, "", "  ")
+		if err := os.WriteFile(configFile, data, 0644); err != nil {
+			fmt.Printf("Error creating config file: %v\n", err)
+		}
+	} else {
+		fmt.Println("Config file found.")
+	}
+
+	// 检查并创建 daemons 目录
+	if _, err := os.Stat(daemonDir); os.IsNotExist(err) {
+		fmt.Println("Daemons directory not found, creating ./daemons...")
+		if err := os.Mkdir(daemonDir, 0755); err != nil {
+			fmt.Printf("Error creating daemons directory: %v\n", err)
+		}
+	} else {
+		fmt.Println("Daemons directory found.")
+	}
+}
+
 func main() {
+	setup()
 	r := gin.Default()
 
 	// 添加 CORS 中间件
