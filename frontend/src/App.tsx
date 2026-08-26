@@ -46,7 +46,12 @@ type ScriptForm = {
   autoStart: boolean
 }
 
-const API_BASE = import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:8080'
+type Config = {
+  port: number
+  name: string
+}
+
+const API_BASE = import.meta.env.VITE_API_BASE_URL ?? ''
 
 const emptyForm: ScriptForm = {
   name: '',
@@ -56,6 +61,7 @@ const emptyForm: ScriptForm = {
 }
 
 function App() {
+  const [config, setConfig] = useState<Config | null>(null)
   const [scripts, setScripts] = useState<Script[]>([])
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [form, setForm] = useState<ScriptForm>(emptyForm)
@@ -97,8 +103,17 @@ function App() {
       if (current && data.scripts.some((script) => script.id === current)) {
         return current
       }
-      return data.scripts[0]?.id ?? null
+      return null
     })
+  }
+
+  async function loadConfig() {
+    try {
+      const data = await fetchJson<Config>('/api/config')
+      setConfig(data)
+    } catch (err) {
+      console.error('Failed to load config:', err)
+    }
   }
 
   async function loadLogs(id: string) {
@@ -107,6 +122,7 @@ function App() {
   }
 
   useEffect(() => {
+    loadConfig()
     loadScripts()
       .catch((err: Error) => {
         setError(err.message)
@@ -291,7 +307,7 @@ function App() {
       <AppBar position="static">
         <Toolbar>
           <Typography variant="h6" sx={{ flexGrow: 1 }}>
-            Minivisor
+            {config?.name ?? 'Minivisor'}
           </Typography>
           <Chip
             label={notice}

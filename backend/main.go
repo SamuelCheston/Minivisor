@@ -103,8 +103,17 @@ func setupEnvironment() (Config, string, string, error) {
 		return Config{}, "", "", err
 	}
 
+	// 查找配置文件，先在当前目录找，找不到去上级目录找
 	configPath := filepath.Join(wd, configFileName)
-	daemonRoot := filepath.Join(wd, daemonRootDirName)
+	if _, err := os.Stat(configPath); os.IsNotExist(err) {
+		parentConfig := filepath.Join(wd, "..", configFileName)
+		if _, err := os.Stat(parentConfig); err == nil {
+			configPath = parentConfig
+		}
+	}
+
+	// 确定数据目录 (daemons) 应该与配置文件在同一级
+	daemonRoot := filepath.Join(filepath.Dir(configPath), daemonRootDirName)
 	storePath := filepath.Join(daemonRoot, scriptsStoreName)
 	scriptFiles := filepath.Join(daemonRoot, scriptFilesDirName)
 
@@ -708,6 +717,10 @@ func main() {
 
 	api := r.Group("/api")
 	{
+		api.GET("/config", func(c *gin.Context) {
+			c.JSON(http.StatusOK, config)
+		})
+
 		api.GET("/scripts", func(c *gin.Context) {
 			c.JSON(http.StatusOK, gin.H{"scripts": app.listScripts()})
 		})
