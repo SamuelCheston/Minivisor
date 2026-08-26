@@ -159,3 +159,43 @@ func checkAndCreateUser(username string) {
 	fmt.Printf("User '%s' does not exist. You might need to create it:\n", username)
 	fmt.Printf("  sudo useradd -r -s /bin/false %s\n", username)
 }
+
+type ServiceStatus struct {
+	Type       string `json:"type"`
+	Installed  bool   `json:"installed"`
+	UserExists bool   `json:"userExists"`
+	UnitPath   string `json:"unitPath"`
+	CanInstall bool   `json:"canInstall"`
+}
+
+func getServiceStatus() ServiceStatus {
+	status := ServiceStatus{
+		Type:       "none",
+		Installed:  false,
+		UserExists: false,
+		CanInstall: false,
+	}
+
+	// Check user
+	err := exec.Command("id", "-u", "minivisor").Run()
+	status.UserExists = (err == nil)
+
+	// Check systemd
+	if _, err := exec.LookPath("systemctl"); err == nil {
+		status.Type = "systemd"
+		status.UnitPath = "/etc/systemd/system/minivisor.service"
+		if _, err := os.Stat(status.UnitPath); err == nil {
+			status.Installed = true
+		}
+		status.CanInstall = true
+	} else if _, err := exec.LookPath("rc-service"); err == nil {
+		status.Type = "openrc"
+		status.UnitPath = "/etc/init.d/minivisor"
+		if _, err := os.Stat(status.UnitPath); err == nil {
+			status.Installed = true
+		}
+		status.CanInstall = true
+	}
+
+	return status
+}

@@ -893,6 +893,27 @@ func main() {
 				}
 			}
 		})
+
+		api.GET("/service/status", func(c *gin.Context) {
+			c.JSON(http.StatusOK, getServiceStatus())
+		})
+
+		api.POST("/service/install", func(c *gin.Context) {
+			var payload struct {
+				Type string `json:"type"`
+			}
+			if err := c.ShouldBindJSON(&payload); err != nil {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "无效的请求参数"})
+				return
+			}
+
+			if err := installService(payload.Type); err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+				return
+			}
+
+			c.JSON(http.StatusOK, gin.H{"message": "服务配置已生成，请按提示完成安装"})
+		})
 	}
 
 	// 静态文件服务 (SPA 支持)

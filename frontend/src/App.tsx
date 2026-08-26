@@ -7,6 +7,10 @@ import {
   Chip,
   CircularProgress,
   Container,
+  Dialog,
+  DialogActions,
+  DialogContent,
+  DialogTitle,
   Divider,
   FormControlLabel,
   List,
@@ -51,6 +55,14 @@ type Config = {
   name: string
 }
 
+type ServiceStatus = {
+  type: string
+  installed: boolean
+  userExists: boolean
+  unitPath: string
+  canInstall: boolean
+}
+
 const API_BASE = import.meta.env.VITE_API_BASE_URL ?? ''
 
 const emptyForm: ScriptForm = {
@@ -62,6 +74,8 @@ const emptyForm: ScriptForm = {
 
 function App() {
   const [config, setConfig] = useState<Config | null>(null)
+  const [serviceStatus, setServiceStatus] = useState<ServiceStatus | null>(null)
+  const [serviceDialogOpen, setServiceDialogOpen] = useState(false)
   const [scripts, setScripts] = useState<Script[]>([])
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [form, setForm] = useState<ScriptForm>(emptyForm)
@@ -116,6 +130,34 @@ function App() {
     }
   }
 
+  async function loadServiceStatus() {
+    try {
+      const data = await fetchJson<ServiceStatus>('/api/service/status')
+      setServiceStatus(data)
+    } catch (err) {
+      console.error('Failed to load service status:', err)
+    }
+  }
+
+  async function handleInstallService() {
+    if (!serviceStatus?.type || serviceStatus.type === 'none') return
+    
+    setActioning(true)
+    setError('')
+    try {
+      const data = await fetchJson<{ message: string }>('/api/service/install', {
+        method: 'POST',
+        body: JSON.stringify({ type: serviceStatus.type }),
+      })
+      alert(data.message)
+      await loadServiceStatus()
+    } catch (err) {
+      setError((err as Error).message)
+    } finally {
+      setActioning(false)
+    }
+  }
+
   async function loadLogs(id: string) {
     const data = await fetchJson<{ logs: LogEntry[] }>(`/api/scripts/${id}/logs`)
     setLogs(data.logs)
@@ -123,6 +165,7 @@ function App() {
 
   useEffect(() => {
     loadConfig()
+    loadServiceStatus()
     loadScripts()
       .catch((err: Error) => {
         setError(err.message)
@@ -309,6 +352,16 @@ function App() {
           <Typography variant="h6" sx={{ flexGrow: 1 }}>
             {config?.name ?? 'Minivisor'}
           </Typography>
+          <Button
+            color="inherit"
+            onClick={() => {
+              loadServiceStatus()
+              setServiceDialogOpen(true)
+            }}
+            sx={{ mr: 2 }}
+          >
+            服务管理
+          </Button>
           <Chip
             label={notice}
             color={notice.includes('失败') ? 'error' : 'success'}
@@ -551,6 +604,98 @@ function App() {
           </Stack>
         </Stack>
       </Container>
+
+      <Dialog
+        open={serviceDialogOpen}
+        onClose={() => setServiceDialogOpen(false)}
+        maxWidth="sm"
+        fullWidth
+      >
+        <DialogTitle>服务管理 (systemd / OpenRC)</DialogTitle>
+        <DialogContent>
+          <Stack spacing={2} sx={{ mt: 1 }}>
+            <Box>
+              <Typography variant="subtitle2" gutterBottom>
+                当前系统环境
+              </Typography>
+              <Typography variant="body2" color="text.secondary">
+                检测到的初始化系统：
+                <Box component="span" sx={{ fontWeight: 'bold', ml: 1, color: 'primary.main' }}>
+                  {serviceStatus?.type === 'none' ? '未检测到' : serviceStatus?.type}
+                </Box>
+              </Typography>
+            </Box>
+
+            <Divider />
+
+            <Box>
+              <Typography variant="subtitle2" gutterBottom>
+                安装状态
+              </Typography>
+              {serviceStatus?.installed ? (
+                <Alert severity="success" sx={{ py: 0 }}>
+                  服务已安装在：{serviceStatus.unitPath}
+                </Alert>
+              ) : (
+                <Alert severity="info" sx={{ py: 0 }}>
+                  服务尚未安装为系统自启动服务。
+                </Alert>
+              )}
+            </Box>
+
+            <Box>
+              <Typography variant="subtitle2" gutterBottom>
+                专用用户检查
+              </Typography>
+              {serviceStatus?.userExists ? (
+                <Typography variant="body2" color="success.main">
+                  ✓ 用户 'minivisor' 已存在。
+                </Typography>
+              ) : (
+                <Typography variant="body2" color="warning.main">
+                  ⚠ 用户 'minivisor' 不存在。安装前请手动创建：
+                  <Box
+                    component="pre"
+                    sx={{
+                      p: 1,
+                      backgroundColor: '#f0f0f0',
+                      borderRadius: 1,
+                      fontSize: 12,
+                      mt: 1,
+                    }}
+                  >
+                    sudo useradd -r -s /bin/false minivisor
+                  </Box>
+                </Typography>
+              )}
+            </Box>
+
+            {!serviceStatus?.installed && serviceStatus?.canInstall && (
+              <Box>
+                <Typography variant="subtitle2" gutterBottom>
+                  操作建议
+                </Typography>
+                <Typography variant="body2">
+                  点击下方按钮生成配置文件。由于需要写入系统目录，如果当前进程权限不足，后端会提示你使用
+                  sudo 命令在终端完成。
+                </Typography>
+              </Box>
+            )}
+          </Stack>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setServiceDialogOpen(false)}>关闭</Button>
+          {!serviceStatus?.installed && serviceStatus?.canInstall && (
+            <Button
+              variant="contained"
+              onClick={handleInstallService}
+              disabled={actioning}
+            >
+              生成配置并安装
+            </Button>
+          )}
+        </DialogActions>
+      </Dialog>
     </Box>
   )
 }
