@@ -23,6 +23,9 @@ import {
   Toolbar,
   Typography,
 } from '@mui/material'
+import { Terminal } from '@xterm/xterm'
+import { FitAddon } from '@xterm/addon-fit'
+import '@xterm/xterm/css/xterm.css'
 
 type Script = {
   id: string
@@ -72,6 +75,120 @@ const emptyForm: ScriptForm = {
   autoStart: false,
 }
 
+function TerminalView({ scriptId }: { scriptId: string }) {
+  const terminalRef = useRef<HTMLDivElement>(null)
+  const xtermRef = useRef<Terminal | null>(null)
+  const socketRef = useRef<WebSocket | null>(null)
+
+  useEffect(() => {
+    if (!terminalRef.current) return
+
+    const term = new Terminal({
+      cursorBlink: true,
+      fontSize: 13,
+      fontFamily: 'ui-monospace, SFMono-Regular, monospace',
+      theme: {
+        background: '#111827',
+        foreground: '#e5e7eb',
+      },
+      convertEol: true,
+    })
+
+    const fitAddon = new FitAddon()
+    term.loadAddon(fitAddon)
+    term.open(terminalRef.current)
+    
+    // 延迟 fit 确保容器已完全渲染
+    setTimeout(() => fitAddon.fit(), 100)
+    xtermRef.current = term
+
+    const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
+    // 如果 API_BASE 是相对路径，需要补全主机名
+    let wsBase = API_BASE
+    if (!wsBase.startsWith('http')) {
+      wsBase = window.location.host + API_BASE
+    } else {
+      wsBase = wsBase.replace(/^https?:\/\//, '')
+    }
+    
+    const wsUrl = `${wsProtocol}//${wsBase}/api/scripts/${scriptId}/terminal`
+    
+    const socket = new WebSocket(wsUrl)
+    socketRef.current = socket
+
+    socket.onopen = () => {
+      // 连接成功后立即获取焦点
+      term.focus()
+      
+      socket.send(JSON.stringify({
+        type: 'resize',
+        cols: term.cols,
+        rows: term.rows
+      }))
+    }
+
+    socket.onmessage = async (event) => {
+      if (event.data instanceof Blob) {
+        const text = await event.data.text()
+        term.write(text)
+      } else if (typeof event.data === 'string') {
+        try {
+          // 兼容旧的 JSON 格式（如果后端还在发送）
+          const entry = JSON.parse(event.data) as LogEntry
+          term.writeln(`\x1b[90m[${new Date(entry.timestamp).toLocaleTimeString()}]\x1b[0m ${entry.message}`)
+        } catch (e) {
+          term.write(event.data)
+        }
+      }
+    }
+
+    socket.onclose = () => {
+      // 终端连接断开时不输出额外信息，保持纯净
+    }
+
+    term.onData((data) => {
+      if (socket.readyState === WebSocket.OPEN) {
+        socket.send(JSON.stringify({ type: 'input', data }))
+      }
+    })
+
+    const handleResize = () => {
+      fitAddon.fit()
+      if (socket.readyState === WebSocket.OPEN) {
+        socket.send(JSON.stringify({
+          type: 'resize',
+          cols: term.cols,
+          rows: term.rows
+        }))
+      }
+    }
+
+    window.addEventListener('resize', handleResize)
+
+    return () => {
+      window.removeEventListener('resize', handleResize)
+      socket.close()
+      term.dispose()
+    }
+  }, [scriptId])
+
+  return (
+    <Box 
+      ref={terminalRef} 
+      sx={{ 
+        height: 360, 
+        width: '100%', 
+        backgroundColor: '#111827', 
+        borderRadius: 2, 
+        overflow: 'hidden',
+        '& .xterm-viewport': {
+          backgroundColor: '#111827 !important'
+        }
+      }} 
+    />
+  )
+}
+
 function App() {
   const [config, setConfig] = useState<Config | null>(null)
   const [serviceStatus, setServiceStatus] = useState<ServiceStatus | null>(null)
@@ -79,13 +196,11 @@ function App() {
   const [scripts, setScripts] = useState<Script[]>([])
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [form, setForm] = useState<ScriptForm>(emptyForm)
-  const [logs, setLogs] = useState<LogEntry[]>([])
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
   const [actioning, setActioning] = useState(false)
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('后端连接中...')
-  const logContainerRef = useRef<HTMLDivElement | null>(null)
 
   const selectedScript = useMemo(
     () => scripts.find((script) => script.id === selectedId) ?? null,
@@ -158,11 +273,6 @@ function App() {
     }
   }
 
-  async function loadLogs(id: string) {
-    const data = await fetchJson<{ logs: LogEntry[] }>(`/api/scripts/${id}/logs`)
-    setLogs(data.logs)
-  }
-
   useEffect(() => {
     loadConfig()
     loadServiceStatus()
@@ -198,45 +308,10 @@ function App() {
 
   useEffect(() => {
     if (!selectedId) {
-      setLogs([])
       return
     }
-
-    let active = true
-    const stream = new EventSource(`${API_BASE}/api/scripts/${selectedId}/logs/stream`)
-
-    loadLogs(selectedId).catch(() => undefined)
-
-    stream.onmessage = (event) => {
-      if (!active) {
-        return
-      }
-
-      const entry = JSON.parse(event.data) as LogEntry
-      setLogs((current) => {
-        const next = [...current, entry]
-        return next.slice(-500)
-      })
-      loadScripts().catch(() => undefined)
-    }
-
-    stream.onerror = () => {
-      stream.close()
-    }
-
-    return () => {
-      active = false
-      stream.close()
-    }
+    loadScripts().catch(() => undefined)
   }, [selectedId])
-
-  useEffect(() => {
-    if (!logContainerRef.current) {
-      return
-    }
-
-    logContainerRef.current.scrollTop = logContainerRef.current.scrollHeight
-  }, [logs])
 
   function updateForm<K extends keyof ScriptForm>(key: K, value: ScriptForm[K]) {
     setForm((current) => ({ ...current, [key]: value }))
@@ -329,7 +404,6 @@ function App() {
     try {
       await fetchJson(`/api/scripts/${selectedScript.id}`, { method: 'DELETE' })
       setSelectedId(null)
-      setLogs([])
       await loadScripts()
     } catch (err) {
       setError((err as Error).message)
@@ -341,7 +415,6 @@ function App() {
   function handleCreateNew() {
     setSelectedId(null)
     setForm(emptyForm)
-    setLogs([])
     setError('')
   }
 
@@ -550,55 +623,29 @@ function App() {
                 <Box>
                   <Typography variant="h6">实时日志</Typography>
                   <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5 }}>
-                    这里会显示脚本的 stdout、stderr 和系统事件。
+                    这里会显示脚本的 stdout、stderr 和系统事件。支持 ANSI 颜色及键盘交互。
                   </Typography>
                 </Box>
 
-                <Box
-                  ref={logContainerRef}
-                  sx={{
-                    height: 360,
-                    overflowY: 'auto',
-                    borderRadius: 2,
-                    backgroundColor: '#111827',
-                    color: '#e5e7eb',
-                    p: 2,
-                    fontFamily: 'ui-monospace, SFMono-Regular, monospace',
-                    fontSize: 13,
-                    whiteSpace: 'pre-wrap',
-                    wordBreak: 'break-word',
-                  }}
-                >
-                  {selectedId ? (
-                    logs.length > 0 ? (
-                      logs.map((entry, index) => (
-                        <Box key={`${entry.timestamp}-${index}`} sx={{ mb: 1 }}>
-                          <Box component="span" sx={{ color: '#9ca3af' }}>
-                            [{new Date(entry.timestamp).toLocaleTimeString()}]
-                          </Box>{' '}
-                          <Box
-                            component="span"
-                            sx={{
-                              color:
-                                entry.source === 'stderr'
-                                  ? '#fca5a5'
-                                  : entry.source === 'system'
-                                    ? '#93c5fd'
-                                    : '#86efac',
-                            }}
-                          >
-                            {entry.source}
-                          </Box>{' '}
-                          <Box component="span">{entry.message}</Box>
-                        </Box>
-                      ))
-                    ) : (
-                      <Typography color="#9ca3af">还没有日志输出。</Typography>
-                    )
-                  ) : (
-                    <Typography color="#9ca3af">选择一个脚本后可查看日志。</Typography>
-                  )}
-                </Box>
+                {selectedId ? (
+                  <TerminalView scriptId={selectedId} />
+                ) : (
+                  <Box
+                    sx={{
+                      height: 360,
+                      borderRadius: 2,
+                      backgroundColor: '#111827',
+                      color: '#9ca3af',
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      fontFamily: 'ui-monospace, SFMono-Regular, monospace',
+                      fontSize: 13,
+                    }}
+                  >
+                    选择一个脚本后可查看日志。
+                  </Box>
+                )}
               </Stack>
             </Paper>
           </Stack>

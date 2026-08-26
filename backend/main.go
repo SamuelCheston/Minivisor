@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bufio"
 	"embed"
 	"encoding/json"
 	"errors"
@@ -19,7 +18,10 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/creack/pty"
 	"github.com/gin-gonic/gin"
+	"github.com/gorilla/websocket"
+	"github.com/mattn/go-isatty"
 )
 
 //go:embed dist/*
@@ -85,7 +87,10 @@ type ManagedScript struct {
 	StartedAt   *time.Time
 	Logs        []LogEntry
 	Cmd         *exec.Cmd
+	Pty         *os.File
 	Subscribers map[chan LogEntry]struct{}
+	Terminal    chan []byte
+	TermSubs    map[chan []byte]struct{}
 }
 
 type App struct {
@@ -94,8 +99,9 @@ type App struct {
 	storePath   string
 	scriptFiles string
 
-	mu      sync.RWMutex
-	scripts map[string]*ManagedScript
+	mu       sync.RWMutex
+	scripts  map[string]*ManagedScript
+	upgrader websocket.Upgrader
 }
 
 func setupEnvironment() (Config, string, string, error) {
@@ -172,6 +178,11 @@ func newApp(config Config, storePath, scriptFiles string) (*App, error) {
 		storePath:   storePath,
 		scriptFiles: scriptFiles,
 		scripts:     make(map[string]*ManagedScript),
+		upgrader: websocket.Upgrader{
+			CheckOrigin: func(r *http.Request) bool {
+				return true
+			},
+		},
 	}
 
 	if err := app.loadScripts(); err != nil {
@@ -199,6 +210,7 @@ func (a *App) loadScripts() error {
 			Config:      storedScript,
 			Status:      "stopped",
 			Subscribers: make(map[chan LogEntry]struct{}),
+			TermSubs:    make(map[chan []byte]struct{}),
 			Logs:        []LogEntry{},
 		}
 	}
@@ -312,6 +324,7 @@ func (a *App) createScript(payload ScriptPayload) (ScriptView, error) {
 		Config:      script,
 		Status:      "stopped",
 		Subscribers: make(map[chan LogEntry]struct{}),
+		TermSubs:    make(map[chan []byte]struct{}),
 		Logs:        []LogEntry{},
 	}
 
@@ -446,23 +459,15 @@ func (a *App) startScript(id string) (ScriptView, error) {
 	cmd.Dir = item.Config.WorkDir
 	cmd.Env = os.Environ()
 
-	stdout, err := cmd.StdoutPipe()
+	f, err := pty.Start(cmd)
 	if err != nil {
-		a.mu.Unlock()
-		return ScriptView{}, err
-	}
-	stderr, err := cmd.StderrPipe()
-	if err != nil {
-		a.mu.Unlock()
-		return ScriptView{}, err
-	}
-	if err := cmd.Start(); err != nil {
 		a.mu.Unlock()
 		return ScriptView{}, err
 	}
 
 	now := time.Now()
 	item.Cmd = cmd
+	item.Pty = f
 	item.Status = "running"
 	item.PID = cmd.Process.Pid
 	item.StartedAt = &now
@@ -470,29 +475,45 @@ func (a *App) startScript(id string) (ScriptView, error) {
 	a.mu.Unlock()
 
 	a.appendLog(id, "system", fmt.Sprintf("脚本已启动，PID=%d", view.PID))
-	go a.consumePipe(id, "stdout", stdout)
-	go a.consumePipe(id, "stderr", stderr)
+	go a.consumePty(id, f)
 	go a.watchProcess(id, cmd)
 
 	return view, nil
 }
 
-func (a *App) consumePipe(id, source string, reader io.ReadCloser) {
-	defer reader.Close()
+func (a *App) consumePty(id string, f *os.File) {
+	defer f.Close()
 
-	scanner := bufio.NewScanner(reader)
-	buffer := make([]byte, 0, 64*1024)
-	scanner.Buffer(buffer, 1024*1024)
+	buf := make([]byte, 4096)
+	for {
+		n, err := f.Read(buf)
+		if n > 0 {
+			data := make([]byte, n)
+			copy(data, buf[:n])
 
-	for scanner.Scan() {
-		a.appendLog(id, source, scanner.Text())
-	}
+			a.mu.Lock()
+			item, ok := a.scripts[id]
+			if ok {
+				// 广播 raw 字节流给终端订阅者
+				for sub := range item.TermSubs {
+					select {
+					case sub <- data:
+					default:
+					}
+				}
 
-	if err := scanner.Err(); err != nil {
-		if strings.Contains(err.Error(), "file already closed") {
-			return
+				// 同时保留传统的行日志（用于历史查看）
+				// 注意：这里为了历史查看仍使用 Scanner 逻辑可能会导致体验不一致
+				// 但为了兼容，我们先只处理 raw 输出
+			}
+			a.mu.Unlock()
 		}
-		a.appendLog(id, "system", fmt.Sprintf("%s 读取失败: %v", source, err))
+		if err != nil {
+			if !errors.Is(err, os.ErrClosed) && !strings.Contains(err.Error(), "input/output error") {
+				a.appendLog(id, "system", fmt.Sprintf("PTY 读取失败: %v", err))
+			}
+			break
+		}
 	}
 }
 
@@ -684,8 +705,87 @@ func writeSSE(w io.Writer, entry LogEntry) error {
 	return err
 }
 
+func (a *App) handleTerminalWS(c *gin.Context) {
+	id := c.Param("id")
+	a.mu.RLock()
+	item, ok := a.scripts[id]
+	a.mu.RUnlock()
+
+	if !ok {
+		c.JSON(http.StatusNotFound, gin.H{"error": "脚本不存在"})
+		return
+	}
+
+	conn, err := a.upgrader.Upgrade(c.Writer, c.Request, nil)
+	if err != nil {
+		return
+	}
+	defer conn.Close()
+
+	// 订阅实时 raw 数据
+	subscriber := make(chan []byte, 128)
+	a.mu.Lock()
+	item.TermSubs[subscriber] = struct{}{}
+	a.mu.Unlock()
+
+	defer func() {
+		a.mu.Lock()
+		delete(item.TermSubs, subscriber)
+		a.mu.Unlock()
+	}()
+
+	// 处理客户端输入
+	go func() {
+		for {
+			mt, message, err := conn.ReadMessage()
+			if err != nil {
+				return
+			}
+
+			if mt == websocket.BinaryMessage || mt == websocket.TextMessage {
+				var input struct {
+					Type string `json:"type"`
+					Data string `json:"data"`
+					Cols int    `json:"cols"`
+					Rows int    `json:"rows"`
+				}
+				if err := json.Unmarshal(message, &input); err == nil {
+					a.mu.RLock()
+					script, ok := a.scripts[id]
+					if ok && script.Status == "running" && script.Pty != nil {
+						if input.Type == "input" {
+							_, _ = script.Pty.Write([]byte(input.Data))
+						} else if input.Type == "resize" && input.Cols > 0 && input.Rows > 0 {
+							_ = pty.Setsize(script.Pty, &pty.Winsize{
+								Cols: uint16(input.Cols),
+								Rows: uint16(input.Rows),
+							})
+						}
+					}
+					a.mu.RUnlock()
+				} else {
+					// 如果不是 JSON，尝试作为 raw input 处理
+					a.mu.RLock()
+					script, ok := a.scripts[id]
+					if ok && script.Status == "running" && script.Pty != nil {
+						_, _ = script.Pty.Write(message)
+					}
+					a.mu.RUnlock()
+				}
+			}
+		}
+	}()
+
+	for data := range subscriber {
+		if err := conn.WriteMessage(websocket.BinaryMessage, data); err != nil {
+			break
+		}
+	}
+}
+
 func main() {
 	serviceInstall := flag.String("service-install", "", "Install as a system service (systemd or openrc)")
+	noTUI := flag.Bool("no-tui", false, "Disable interactive terminal UI")
 	flag.Parse()
 
 	if *serviceInstall != "" {
@@ -704,6 +804,13 @@ func main() {
 	app, err := newApp(config, storePath, scriptFiles)
 	if err != nil {
 		panic(err)
+	}
+
+	var tui *TUI
+	if !*noTUI && isatty.IsTerminal(os.Stdout.Fd()) {
+		tui = NewTUI(app)
+		gin.DefaultWriter = tui.GetLogWriter()
+		gin.DefaultErrorWriter = tui.GetLogWriter()
 	}
 
 	r := gin.Default()
@@ -894,6 +1001,8 @@ func main() {
 			}
 		})
 
+		api.GET("/scripts/:id/terminal", app.handleTerminalWS)
+
 		api.GET("/service/status", func(c *gin.Context) {
 			c.JSON(http.StatusOK, getServiceStatus())
 		})
@@ -938,8 +1047,20 @@ func main() {
 
 	app.startAutoScripts()
 	address := fmt.Sprintf(":%d", config.Port)
-	fmt.Printf("%s listening on %s\n", config.Name, address)
-	if err := r.Run(address); err != nil {
-		panic(err)
+	if tui != nil {
+		tui.Log(fmt.Sprintf("%s listening on %s", config.Name, address))
+		go func() {
+			if err := r.Run(address); err != nil {
+				panic(err)
+			}
+		}()
+		if err := tui.Run(); err != nil {
+			panic(err)
+		}
+	} else {
+		fmt.Printf("%s listening on %s\n", config.Name, address)
+		if err := r.Run(address); err != nil {
+			panic(err)
+		}
 	}
 }

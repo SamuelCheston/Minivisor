@@ -8,6 +8,15 @@
       "autoStart": false,
       "createdAt": "2026-08-25T21:40:13.698585672+08:00",
       "updatedAt": "2026-08-25T21:40:13.698585672+08:00"
+    },
+    {
+      "id": "script-1787752782677000707",
+      "name": "Test Terminal",
+      "workDir": "/home/lnb/Minivisor",
+      "content": "echo -e \"\\x1b[32mGreen\\x1b[0m and \\x1b[31mRed\\x1b[0m\"\necho \"What is your name?\"\nread name\necho \"Hi $name!\"",
+      "autoStart": false,
+      "createdAt": "2026-08-26T21:59:42.677000658+08:00",
+      "updatedAt": "2026-08-26T21:59:42.677000658+08:00"
     }
   ]
 }
