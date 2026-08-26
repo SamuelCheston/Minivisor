@@ -5,6 +5,7 @@ import (
 	"embed"
 	"encoding/json"
 	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"io/fs"
@@ -684,6 +685,17 @@ func writeSSE(w io.Writer, entry LogEntry) error {
 }
 
 func main() {
+	serviceInstall := flag.String("service-install", "", "Install as a system service (systemd or openrc)")
+	flag.Parse()
+
+	if *serviceInstall != "" {
+		if err := installService(*serviceInstall); err != nil {
+			fmt.Fprintf(os.Stderr, "Error installing service: %v\n", err)
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
+
 	config, storePath, scriptFiles, err := setupEnvironment()
 	if err != nil {
 		panic(err)
