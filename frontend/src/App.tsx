@@ -350,7 +350,7 @@ function App() {
       <AppBar position="static">
         <Toolbar>
           <Typography variant="h6" sx={{ flexGrow: 1 }}>
-            {config?.name ?? 'Minivisor'}
+            {config?.name ?? 'Tinyvisor'}
           </Typography>
           <Button
             color="inherit"
@@ -649,11 +649,11 @@ function App() {
               </Typography>
               {serviceStatus?.userExists ? (
                 <Typography variant="body2" color="success.main">
-                  ✓ 用户 'minivisor' 已存在。
+                  ✓ 用户 'tinyvisor' 已存在。
                 </Typography>
               ) : (
                 <Typography variant="body2" color="warning.main">
-                  ⚠ 用户 'minivisor' 不存在。安装前请手动创建：
+                  ⚠ 用户 'tinyvisor' 不存在。安装前请手动创建：
                   <Box
                     component="pre"
                     sx={{
@@ -664,7 +664,7 @@ function App() {
                       mt: 1,
                     }}
                   >
-                    sudo useradd -r -s /bin/false minivisor
+                    sudo useradd -r -s /bin/false tinyvisor
                   </Box>
                 </Typography>
               )}

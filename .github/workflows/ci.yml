@@ -44,4 +44,4 @@ jobs:
         working-directory: backend
         run: |
           mkdir -p ../build
-          go build -v -o ../build/minivisor .
+          go build -v -o ../build/tinyvisor .

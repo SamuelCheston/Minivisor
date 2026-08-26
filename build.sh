@@ -10,7 +10,7 @@ cd ..
 echo "Building Backend..."
 mkdir -p build
 cd backend
-go build -o ../build/minivisor .
+go build -o ../build/tinyvisor .
 cd ..
 
-echo "Done! Binary is at ./build/minivisor"
+echo "Done! Binary is at ./build/tinyvisor"

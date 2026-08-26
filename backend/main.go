@@ -125,7 +125,7 @@ func setupEnvironment() (Config, string, string, error) {
 	if _, statErr := os.Stat(configPath); os.IsNotExist(statErr) {
 		defaultConfig := Config{
 			Port: 7891,
-			Name: "Minivisor Service",
+			Name: "Tinyvisor Service",
 		}
 		data, marshalErr := json.MarshalIndent(defaultConfig, "", "  ")
 		if marshalErr != nil {
@@ -159,7 +159,7 @@ func setupEnvironment() (Config, string, string, error) {
 		config.Port = 8080
 	}
 	if strings.TrimSpace(config.Name) == "" {
-		config.Name = "Minivisor Service"
+		config.Name = "Tinyvisor Service"
 	}
 
 	return config, storePath, scriptFiles, nil

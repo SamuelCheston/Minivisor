@@ -1,4 +1,4 @@
-module minivisor/backend
+module tinyvisor/backend
 
 go 1.26.4
 

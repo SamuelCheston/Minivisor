@@ -10,7 +10,7 @@ import (
 )
 
 const systemdTemplate = `[Unit]
-Description=Minivisor Service
+Description=Tinyvisor Service
 After=network.target
 
 [Service]
@@ -27,8 +27,8 @@ WantedBy=multi-user.target
 
 const openrcTemplate = `#!/sbin/openrc-run
 
-name="minivisor"
-description="Minivisor Service"
+name="tinyvisor"
+description="Tinyvisor Service"
 command="{{.ExecPath}}"
 command_args=""
 command_user="{{.User}}"
@@ -59,8 +59,8 @@ func installService(serviceType string) error {
 
 	workDir := filepath.Dir(execPath)
 
-	// Default to 'minivisor' user as requested by user decision
-	user := "minivisor"
+	// Default to 'tinyvisor' user as requested by user decision
+	user := "tinyvisor"
 	checkAndCreateUser(user)
 
 	config := ServiceConfig{
@@ -90,14 +90,14 @@ func installSystemd(config ServiceConfig) error {
 		return err
 	}
 
-	unitPath := "/etc/systemd/system/minivisor.service"
+	unitPath := "/etc/systemd/system/tinyvisor.service"
 	fmt.Printf("Writing systemd unit file to %s...\n", unitPath)
 
 	err = os.WriteFile(unitPath, buf.Bytes(), 0644)
 	if err != nil {
 		if os.IsPermission(err) {
 			fmt.Println("\nPermission denied. Please run with sudo:")
-			fmt.Printf("sudo ./minivisor -service-install systemd\n")
+			fmt.Printf("sudo ./tinyvisor -service-install systemd\n")
 			return nil
 		}
 		return err
@@ -106,8 +106,8 @@ func installSystemd(config ServiceConfig) error {
 	fmt.Println("Systemd unit file installed successfully.")
 	fmt.Println("To enable and start the service, run:")
 	fmt.Println("  sudo systemctl daemon-reload")
-	fmt.Println("  sudo systemctl enable minivisor")
-	fmt.Println("  sudo systemctl start minivisor")
+	fmt.Println("  sudo systemctl enable tinyvisor")
+	fmt.Println("  sudo systemctl start tinyvisor")
 
 	return nil
 }
@@ -123,14 +123,14 @@ func installOpenRC(config ServiceConfig) error {
 		return err
 	}
 
-	initPath := "/etc/init.d/minivisor"
+	initPath := "/etc/init.d/tinyvisor"
 	fmt.Printf("Writing OpenRC init file to %s...\n", initPath)
 
 	err = os.WriteFile(initPath, buf.Bytes(), 0755)
 	if err != nil {
 		if os.IsPermission(err) {
 			fmt.Println("\nPermission denied. Please run with sudo:")
-			fmt.Printf("sudo ./minivisor -service-install openrc\n")
+			fmt.Printf("sudo ./tinyvisor -service-install openrc\n")
 			return nil
 		}
 		return err
@@ -138,8 +138,8 @@ func installOpenRC(config ServiceConfig) error {
 
 	fmt.Println("OpenRC init file installed successfully.")
 	fmt.Println("To enable and start the service, run:")
-	fmt.Println("  sudo rc-update add minivisor default")
-	fmt.Println("  sudo rc-service minivisor start")
+	fmt.Println("  sudo rc-update add tinyvisor default")
+	fmt.Println("  sudo rc-service tinyvisor start")
 
 	return nil
 }
@@ -177,20 +177,20 @@ func getServiceStatus() ServiceStatus {
 	}
 
 	// Check user
-	err := exec.Command("id", "-u", "minivisor").Run()
+	err := exec.Command("id", "-u", "tinyvisor").Run()
 	status.UserExists = (err == nil)
 
 	// Check systemd
 	if _, err := exec.LookPath("systemctl"); err == nil {
 		status.Type = "systemd"
-		status.UnitPath = "/etc/systemd/system/minivisor.service"
+		status.UnitPath = "/etc/systemd/system/tinyvisor.service"
 		if _, err := os.Stat(status.UnitPath); err == nil {
 			status.Installed = true
 		}
 		status.CanInstall = true
 	} else if _, err := exec.LookPath("rc-service"); err == nil {
 		status.Type = "openrc"
-		status.UnitPath = "/etc/init.d/minivisor"
+		status.UnitPath = "/etc/init.d/tinyvisor"
 		if _, err := os.Stat(status.UnitPath); err == nil {
 			status.Installed = true
 		}
