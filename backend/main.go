@@ -1,13 +1,16 @@
 package main
 
 import (
+	"crypto/rand"
 	"embed"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"io/fs"
+	"math/big"
 	"net/http"
 	"os"
 	"os/exec"
@@ -36,8 +39,10 @@ const (
 )
 
 type Config struct {
-	Port int    `json:"port"`
-	Name string `json:"name"`
+	Port       int    `json:"port"`
+	Name       string `json:"name"`
+	APIKey     string `json:"apiKey"`
+	PairingPIN string `json:"pairingPIN"`
 }
 
 type Script struct {
@@ -104,6 +109,24 @@ type App struct {
 	upgrader websocket.Upgrader
 }
 
+func generateRandomString(length int) string {
+	b := make([]byte, length/2)
+	if _, err := rand.Read(b); err != nil {
+		return ""
+	}
+	return hex.EncodeToString(b)
+}
+
+func generateRandomPIN(length int) string {
+	const charset = "0123456789"
+	result := make([]byte, length)
+	for i := range result {
+		num, _ := rand.Int(rand.Reader, big.NewInt(int64(len(charset))))
+		result[i] = charset[num.Int64()]
+	}
+	return string(result)
+}
+
 func setupEnvironment() (Config, string, string, error) {
 	wd, err := os.Getwd()
 	if err != nil {
@@ -130,8 +153,10 @@ func setupEnvironment() (Config, string, string, error) {
 
 	if _, statErr := os.Stat(configPath); os.IsNotExist(statErr) {
 		defaultConfig := Config{
-			Port: 7891,
-			Name: "Tinyvisor Service",
+			Port:       7891,
+			Name:       "Tinyvisor Service",
+			APIKey:     generateRandomString(32),
+			PairingPIN: generateRandomPIN(4),
 		}
 		data, marshalErr := json.MarshalIndent(defaultConfig, "", "  ")
 		if marshalErr != nil {
@@ -161,6 +186,23 @@ func setupEnvironment() (Config, string, string, error) {
 	if err := json.Unmarshal(configBytes, &config); err != nil {
 		return Config{}, "", "", err
 	}
+
+	// 确保配置中有 APIKey 和 PairingPIN
+	updated := false
+	if config.APIKey == "" {
+		config.APIKey = generateRandomString(32)
+		updated = true
+	}
+	if config.PairingPIN == "" {
+		config.PairingPIN = generateRandomPIN(4)
+		updated = true
+	}
+
+	if updated {
+		data, _ := json.MarshalIndent(config, "", "  ")
+		_ = os.WriteFile(configPath, data, 0644)
+	}
+
 	if config.Port == 0 {
 		config.Port = 8080
 	}
@@ -817,7 +859,7 @@ func main() {
 	r.Use(func(c *gin.Context) {
 		c.Writer.Header().Set("Access-Control-Allow-Origin", "*")
 		// c.Writer.Header().Set("Access-Control-Allow-Credentials", "true")
-		c.Writer.Header().Set("Access-Control-Allow-Headers", "Content-Type, Content-Length, Accept-Encoding, X-CSRF-Token, Authorization, accept, origin, Cache-Control, X-Requested-With")
+		c.Writer.Header().Set("Access-Control-Allow-Headers", "Content-Type, Content-Length, Accept-Encoding, X-CSRF-Token, Authorization, accept, origin, Cache-Control, X-Requested-With, X-Minivisor-Key")
 		c.Writer.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS, GET, PUT, DELETE")
 
 		if c.Request.Method == "OPTIONS" {
@@ -825,6 +867,26 @@ func main() {
 			return
 		}
 
+		c.Next()
+	})
+
+	// Auth Middleware
+	r.Use(func(c *gin.Context) {
+		path := c.Request.URL.Path
+		if path == "/api/pair" || path == "/ping" || path == "/api/config" || !strings.HasPrefix(path, "/api") {
+			c.Next()
+			return
+		}
+
+		key := c.GetHeader("X-Minivisor-Key")
+		if key == "" {
+			key = c.Query("key")
+		}
+
+		if key != config.APIKey {
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "未授权：无效或缺失密钥"})
+			return
+		}
 		c.Next()
 	})
 
@@ -837,7 +899,26 @@ func main() {
 	api := r.Group("/api")
 	{
 		api.GET("/config", func(c *gin.Context) {
-			c.JSON(http.StatusOK, config)
+			c.JSON(http.StatusOK, gin.H{
+				"port": config.Port,
+				"name": config.Name,
+			})
+		})
+
+		api.POST("/pair", func(c *gin.Context) {
+			var payload struct {
+				PIN string `json:"pin"`
+			}
+			if err := c.ShouldBindJSON(&payload); err != nil {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "请求体格式不正确"})
+				return
+			}
+
+			if payload.PIN == config.PairingPIN {
+				c.JSON(http.StatusOK, gin.H{"apiKey": config.APIKey})
+			} else {
+				c.JSON(http.StatusUnauthorized, gin.H{"error": "PIN 码不正确"})
+			}
 		})
 
 		api.GET("/scripts", func(c *gin.Context) {
@@ -1049,6 +1130,7 @@ func main() {
 	address := fmt.Sprintf(":%d", config.Port)
 	if tui != nil {
 		tui.Log(fmt.Sprintf("%s listening on %s", config.Name, address))
+		tui.Log(fmt.Sprintf("Pairing PIN: %s", config.PairingPIN))
 		go func() {
 			if err := r.Run(address); err != nil {
 				panic(err)
@@ -1059,6 +1141,7 @@ func main() {
 		}
 	} else {
 		fmt.Printf("%s listening on %s\n", config.Name, address)
+		fmt.Printf("Pairing PIN: %s\n", config.PairingPIN)
 		if err := r.Run(address); err != nil {
 			panic(err)
 		}

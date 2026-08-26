@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
+import Cookies from 'js-cookie'
 import {
   Alert,
   AppBar,
@@ -10,6 +11,7 @@ import {
   Dialog,
   DialogActions,
   DialogContent,
+  DialogContentText,
   DialogTitle,
   Divider,
   FormControlLabel,
@@ -111,7 +113,8 @@ function TerminalView({ scriptId }: { scriptId: string }) {
       wsBase = wsBase.replace(/^https?:\/\//, '')
     }
     
-    const wsUrl = `${wsProtocol}//${wsBase}/api/scripts/${scriptId}/terminal`
+    const key = Cookies.get('minivisor_key')
+    const wsUrl = `${wsProtocol}//${wsBase}/api/scripts/${scriptId}/terminal?key=${key}`
     
     const socket = new WebSocket(wsUrl)
     socketRef.current = socket
@@ -202,25 +205,70 @@ function App() {
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('后端连接中...')
 
+  const [pairingOpen, setPairingOpen] = useState(!Cookies.get('minivisor_key'))
+  const [pin, setPin] = useState('')
+  const [pairingError, setPairingError] = useState('')
+
   const selectedScript = useMemo(
     () => scripts.find((script) => script.id === selectedId) ?? null,
     [scripts, selectedId],
   )
 
   async function fetchJson<T>(path: string, init?: RequestInit): Promise<T> {
+    const key = Cookies.get('minivisor_key')
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+    }
+    if (key) {
+      headers['X-Minivisor-Key'] = key
+    }
+
     const response = await fetch(`${API_BASE}${path}`, {
-      headers: {
-        'Content-Type': 'application/json',
-      },
+      headers,
       ...init,
     })
 
     const data = await response.json().catch(() => ({}))
+    
+    if (response.status === 401 && path !== '/api/pair' && path !== '/api/config') {
+      Cookies.remove('minivisor_key')
+      setPairingOpen(true)
+      throw new Error('未授权，请重新配对')
+    }
+
     if (!response.ok) {
       throw new Error(data.error ?? '请求失败')
     }
 
     return data as T
+  }
+
+  async function handlePair() {
+    if (pin.length !== 4) {
+      setPairingError('请输入4位 PIN 码')
+      return
+    }
+
+    setActioning(true)
+    setPairingError('')
+    try {
+      const data = await fetchJson<{ apiKey: string }>('/api/pair', {
+        method: 'POST',
+        body: JSON.stringify({ pin }),
+      })
+      // 设置永不过期的 Cookie (设置一个极长的过期时间，比如 100 年)
+      Cookies.set('minivisor_key', data.apiKey, { expires: 365 * 100 })
+      setPairingOpen(false)
+      setPin('')
+      // 重新加载数据
+      loadConfig()
+      loadServiceStatus()
+      loadScripts()
+    } catch (err) {
+      setPairingError((err as Error).message)
+    } finally {
+      setActioning(false)
+    }
   }
 
   async function loadScripts() {
@@ -741,6 +789,52 @@ function App() {
               生成配置并安装
             </Button>
           )}
+        </DialogActions>
+      </Dialog>
+
+      <Dialog
+        open={pairingOpen}
+        maxWidth="xs"
+        fullWidth
+      >
+        <DialogTitle>设备配对</DialogTitle>
+        <DialogContent>
+          <DialogContentText sx={{ mb: 2 }}>
+            首次使用或密钥失效，请输入后端显示的 4 位 PIN 码进行配对。
+          </DialogContentText>
+          {pairingError && (
+            <Alert severity="error" sx={{ mb: 2 }}>
+              {pairingError}
+            </Alert>
+          )}
+          <TextField
+            autoFocus
+            label="4 位 PIN 码"
+            value={pin}
+            onChange={(e) => setPin(e.target.value.slice(0, 4))}
+            fullWidth
+            variant="outlined"
+            slotProps={{
+              htmlInput: {
+                style: { textAlign: 'center', fontSize: 24, letterSpacing: 8 }
+              }
+            }}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') {
+                handlePair()
+              }
+            }}
+          />
+        </DialogContent>
+        <DialogActions sx={{ px: 3, pb: 3 }}>
+          <Button
+            fullWidth
+            variant="contained"
+            onClick={handlePair}
+            disabled={actioning || pin.length !== 4}
+          >
+            {actioning ? '配对中...' : '开始配对'}
+          </Button>
         </DialogActions>
       </Dialog>
     </Box>
