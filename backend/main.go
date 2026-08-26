@@ -38,6 +38,15 @@ const (
 	maxBufferedLogLines = 500
 )
 
+type RestartPolicy string
+
+const (
+	RestartNever         RestartPolicy = "never"
+	RestartAlways        RestartPolicy = "always"
+	RestartUnlessStopped RestartPolicy = "unless-stopped"
+	RestartOnFailure     RestartPolicy = "on-failure"
+)
+
 type Config struct {
 	Port       int    `json:"port"`
 	Name       string `json:"name"`
@@ -46,13 +55,14 @@ type Config struct {
 }
 
 type Script struct {
-	ID        string    `json:"id"`
-	Name      string    `json:"name"`
-	WorkDir   string    `json:"workDir"`
-	Content   string    `json:"content"`
-	AutoStart bool      `json:"autoStart"`
-	CreatedAt time.Time `json:"createdAt"`
-	UpdatedAt time.Time `json:"updatedAt"`
+	ID            string        `json:"id"`
+	Name          string        `json:"name"`
+	WorkDir       string        `json:"workDir"`
+	Content       string        `json:"content"`
+	AutoStart     bool          `json:"autoStart"`
+	RestartPolicy RestartPolicy `json:"restartPolicy"`
+	CreatedAt     time.Time     `json:"createdAt"`
+	UpdatedAt     time.Time     `json:"updatedAt"`
 }
 
 type scriptStore struct {
@@ -60,10 +70,11 @@ type scriptStore struct {
 }
 
 type ScriptPayload struct {
-	Name      string `json:"name"`
-	WorkDir   string `json:"workDir"`
-	Content   string `json:"content"`
-	AutoStart bool   `json:"autoStart"`
+	Name          string        `json:"name"`
+	WorkDir       string        `json:"workDir"`
+	Content       string        `json:"content"`
+	AutoStart     bool          `json:"autoStart"`
+	RestartPolicy RestartPolicy `json:"restartPolicy"`
 }
 
 type LogEntry struct {
@@ -73,16 +84,17 @@ type LogEntry struct {
 }
 
 type ScriptView struct {
-	ID        string     `json:"id"`
-	Name      string     `json:"name"`
-	WorkDir   string     `json:"workDir"`
-	Content   string     `json:"content"`
-	AutoStart bool       `json:"autoStart"`
-	CreatedAt time.Time  `json:"createdAt"`
-	UpdatedAt time.Time  `json:"updatedAt"`
-	Status    string     `json:"status"`
-	PID       int        `json:"pid,omitempty"`
-	StartedAt *time.Time `json:"startedAt,omitempty"`
+	ID            string        `json:"id"`
+	Name          string        `json:"name"`
+	WorkDir       string        `json:"workDir"`
+	Content       string        `json:"content"`
+	AutoStart     bool          `json:"autoStart"`
+	RestartPolicy RestartPolicy `json:"restartPolicy"`
+	CreatedAt     time.Time     `json:"createdAt"`
+	UpdatedAt     time.Time     `json:"updatedAt"`
+	Status        string        `json:"status"`
+	PID           int           `json:"pid,omitempty"`
+	StartedAt     *time.Time    `json:"startedAt,omitempty"`
 }
 
 type ManagedScript struct {
@@ -96,6 +108,7 @@ type ManagedScript struct {
 	Subscribers map[chan LogEntry]struct{}
 	Terminal    chan []byte
 	TermSubs    map[chan []byte]struct{}
+	ManualStop  bool
 }
 
 type App struct {
@@ -298,16 +311,17 @@ func (a *App) listScripts() []ScriptView {
 
 func toScriptView(item *ManagedScript) ScriptView {
 	return ScriptView{
-		ID:        item.Config.ID,
-		Name:      item.Config.Name,
-		WorkDir:   item.Config.WorkDir,
-		Content:   item.Config.Content,
-		AutoStart: item.Config.AutoStart,
-		CreatedAt: item.Config.CreatedAt,
-		UpdatedAt: item.Config.UpdatedAt,
-		Status:    item.Status,
-		PID:       item.PID,
-		StartedAt: item.StartedAt,
+		ID:            item.Config.ID,
+		Name:          item.Config.Name,
+		WorkDir:       item.Config.WorkDir,
+		Content:       item.Config.Content,
+		AutoStart:     item.Config.AutoStart,
+		RestartPolicy: item.Config.RestartPolicy,
+		CreatedAt:     item.Config.CreatedAt,
+		UpdatedAt:     item.Config.UpdatedAt,
+		Status:        item.Status,
+		PID:           item.PID,
+		StartedAt:     item.StartedAt,
 	}
 }
 
@@ -337,6 +351,10 @@ func validatePayload(payload ScriptPayload) (ScriptPayload, error) {
 		return payload, errors.New("脚本内容不能为空")
 	}
 
+	if payload.RestartPolicy == "" {
+		payload.RestartPolicy = RestartNever
+	}
+
 	payload.WorkDir = workDir
 	return payload, nil
 }
@@ -353,13 +371,14 @@ func (a *App) createScript(payload ScriptPayload) (ScriptView, error) {
 
 	now := time.Now()
 	script := Script{
-		ID:        generateID(),
-		Name:      validated.Name,
-		WorkDir:   validated.WorkDir,
-		Content:   validated.Content,
-		AutoStart: validated.AutoStart,
-		CreatedAt: now,
-		UpdatedAt: now,
+		ID:            generateID(),
+		Name:          validated.Name,
+		WorkDir:       validated.WorkDir,
+		Content:       validated.Content,
+		AutoStart:     validated.AutoStart,
+		RestartPolicy: validated.RestartPolicy,
+		CreatedAt:     now,
+		UpdatedAt:     now,
 	}
 
 	item := &ManagedScript{
@@ -402,6 +421,7 @@ func (a *App) updateScript(id string, payload ScriptPayload) (ScriptView, error)
 	item.Config.WorkDir = validated.WorkDir
 	item.Config.Content = validated.Content
 	item.Config.AutoStart = validated.AutoStart
+	item.Config.RestartPolicy = validated.RestartPolicy
 	item.Config.UpdatedAt = time.Now()
 	view := toScriptView(item)
 	a.mu.Unlock()
@@ -513,6 +533,7 @@ func (a *App) startScript(id string) (ScriptView, error) {
 	item.Status = "running"
 	item.PID = cmd.Process.Pid
 	item.StartedAt = &now
+	item.ManualStop = false
 	view := toScriptView(item)
 	a.mu.Unlock()
 
@@ -572,14 +593,49 @@ func (a *App) watchProcess(id string, cmd *exec.Cmd) {
 	item.PID = 0
 	item.StartedAt = nil
 	item.Status = "stopped"
+
+	restartPolicy := item.Config.RestartPolicy
+	manualStop := item.ManualStop
+	exitError := err != nil
 	a.mu.Unlock()
 
 	if err != nil {
 		a.appendLog(id, "system", fmt.Sprintf("脚本退出，错误: %v", err))
-		return
+	} else {
+		a.appendLog(id, "system", "脚本已退出")
 	}
 
-	a.appendLog(id, "system", "脚本已退出")
+	shouldRestart := false
+	switch restartPolicy {
+	case RestartAlways:
+		shouldRestart = true
+	case RestartUnlessStopped:
+		if !manualStop {
+			shouldRestart = true
+		}
+	case RestartOnFailure:
+		if exitError {
+			shouldRestart = true
+		}
+	}
+
+	if shouldRestart {
+		a.appendLog(id, "system", "根据重启策略，准备重启脚本...")
+		time.Sleep(2 * time.Second) // 延迟重启以防频繁崩溃
+
+		// 重启前再次检查是否已被手动停止或删除
+		a.mu.RLock()
+		item, ok := a.scripts[id]
+		if !ok || item.ManualStop {
+			a.mu.RUnlock()
+			return
+		}
+		a.mu.RUnlock()
+
+		if _, err := a.startScript(id); err != nil {
+			a.appendLog(id, "system", fmt.Sprintf("自动重启失败: %v", err))
+		}
+	}
 }
 
 func (a *App) getRunningProcess(id string) (*exec.Cmd, ScriptView, error) {
@@ -599,29 +655,48 @@ func (a *App) getRunningProcess(id string) (*exec.Cmd, ScriptView, error) {
 }
 
 func (a *App) stopScript(id string) (ScriptView, error) {
-	cmd, view, err := a.getRunningProcess(id)
-	if err != nil {
-		return view, err
+	a.mu.Lock()
+	item, ok := a.scripts[id]
+	if !ok {
+		a.mu.Unlock()
+		return ScriptView{}, errors.New("脚本不存在")
 	}
+	item.ManualStop = true
+	cmd := item.Cmd
+	status := item.Status
+	view := toScriptView(item)
+	a.mu.Unlock()
 
 	a.appendLog(id, "system", "收到停止请求")
 
-	if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
-		return view, err
+	if status == "running" && cmd != nil && cmd.Process != nil {
+		if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
+			return view, err
+		}
 	}
 
 	return view, nil
 }
 
 func (a *App) killScript(id string) (ScriptView, error) {
-	cmd, view, err := a.getRunningProcess(id)
-	if err != nil {
-		return view, err
+	a.mu.Lock()
+	item, ok := a.scripts[id]
+	if !ok {
+		a.mu.Unlock()
+		return ScriptView{}, errors.New("脚本不存在")
 	}
+	item.ManualStop = true
+	cmd := item.Cmd
+	status := item.Status
+	view := toScriptView(item)
+	a.mu.Unlock()
 
 	a.appendLog(id, "system", "收到强制结束请求")
-	if err := cmd.Process.Kill(); err != nil {
-		return view, err
+
+	if status == "running" && cmd != nil && cmd.Process != nil {
+		if err := cmd.Process.Kill(); err != nil {
+			return view, err
+		}
 	}
 
 	return view, nil

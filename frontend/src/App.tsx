@@ -14,11 +14,15 @@ import {
   DialogContentText,
   DialogTitle,
   Divider,
+  FormControl,
   FormControlLabel,
+  InputLabel,
   List,
   ListItemButton,
   ListItemText,
+  MenuItem,
   Paper,
+  Select,
   Stack,
   Switch,
   TextField,
@@ -29,12 +33,15 @@ import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import '@xterm/xterm/css/xterm.css'
 
+type RestartPolicy = 'never' | 'always' | 'unless-stopped' | 'on-failure'
+
 type Script = {
   id: string
   name: string
   workDir: string
   content: string
   autoStart: boolean
+  restartPolicy: RestartPolicy
   createdAt: string
   updatedAt: string
   status: string
@@ -53,6 +60,7 @@ type ScriptForm = {
   workDir: string
   content: string
   autoStart: boolean
+  restartPolicy: RestartPolicy
 }
 
 type Config = {
@@ -75,6 +83,7 @@ const emptyForm: ScriptForm = {
   workDir: '',
   content: '',
   autoStart: false,
+  restartPolicy: 'never',
 }
 
 function TerminalView({ scriptId }: { scriptId: string }) {
@@ -333,18 +342,22 @@ function App() {
   }, [])
 
   useEffect(() => {
-    if (!selectedScript) {
+    if (!selectedId) {
       setForm(emptyForm)
       return
     }
 
-    setForm({
-      name: selectedScript.name,
-      workDir: selectedScript.workDir,
-      content: selectedScript.content,
-      autoStart: selectedScript.autoStart,
-    })
-  }, [selectedScript])
+    const script = scripts.find((s) => s.id === selectedId)
+    if (script) {
+      setForm({
+        name: script.name,
+        workDir: script.workDir,
+        content: script.content,
+        autoStart: script.autoStart,
+        restartPolicy: script.restartPolicy,
+      })
+    }
+  }, [selectedId])
 
   useEffect(() => {
     const timer = window.setInterval(() => {
@@ -545,6 +558,14 @@ function App() {
                                 <Typography variant="caption" color="text.secondary">
                                   {script.autoStart ? '服务启动时自动运行' : '手动启动'}
                                 </Typography>
+                                <Typography variant="caption" color="text.secondary">
+                                  重启策略：{
+                                    script.restartPolicy === 'never' ? '从不' :
+                                    script.restartPolicy === 'always' ? '总是' :
+                                    script.restartPolicy === 'unless-stopped' ? '除非手动停止' :
+                                    script.restartPolicy === 'on-failure' ? '失败时' : script.restartPolicy
+                                  }
+                                </Typography>
                               </Stack>
                             }
                           />
@@ -601,6 +622,21 @@ function App() {
                   minRows={12}
                   placeholder={'echo "hello"\npwd\nls -la'}
                 />
+
+                <FormControl fullWidth>
+                  <InputLabel id="restart-policy-label">重启策略</InputLabel>
+                  <Select
+                    labelId="restart-policy-label"
+                    value={form.restartPolicy}
+                    label="重启策略"
+                    onChange={(event) => updateForm('restartPolicy', event.target.value as RestartPolicy)}
+                  >
+                    <MenuItem value="never">从不重启 (never)</MenuItem>
+                    <MenuItem value="always">总是重启 (always)</MenuItem>
+                    <MenuItem value="unless-stopped">除非手动停止 (unless-stopped)</MenuItem>
+                    <MenuItem value="on-failure">失败时重启 (on-failure)</MenuItem>
+                  </Select>
+                </FormControl>
 
                 <FormControlLabel
                   control={
@@ -660,6 +696,14 @@ function App() {
                       label={
                         selectedScript.autoStart ? '启动策略：自动运行' : '启动策略：手动运行'
                       }
+                    />
+                    <Chip
+                      label={`重启策略：${
+                        selectedScript.restartPolicy === 'never' ? '从不' :
+                        selectedScript.restartPolicy === 'always' ? '总是' :
+                        selectedScript.restartPolicy === 'unless-stopped' ? '除非手动停止' :
+                        selectedScript.restartPolicy === 'on-failure' ? '失败时' : selectedScript.restartPolicy
+                      }`}
                     />
                   </Stack>
                 ) : null}

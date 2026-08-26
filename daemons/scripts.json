@@ -6,6 +6,7 @@
       "workDir": "/",
       "content": "ping google.com",
       "autoStart": false,
+      "restartPolicy": "",
       "createdAt": "2026-08-25T21:40:13.698585672+08:00",
       "updatedAt": "2026-08-25T21:40:13.698585672+08:00"
     },
@@ -15,8 +16,19 @@
       "workDir": "/home/lnb/Minivisor",
       "content": "echo -e \"\\x1b[32mGreen\\x1b[0m and \\x1b[31mRed\\x1b[0m\"\necho \"What is your name?\"\nread name\necho \"Hi $name!\"",
       "autoStart": false,
+      "restartPolicy": "",
       "createdAt": "2026-08-26T21:59:42.677000658+08:00",
       "updatedAt": "2026-08-26T21:59:42.677000658+08:00"
+    },
+    {
+      "id": "script-1787754771852237345",
+      "name": "RestartTest",
+      "workDir": "/home/lnb/Minivisor",
+      "content": "echo \"Starting...\"; sleep 5; echo \"Exiting...\"; exit 1",
+      "autoStart": false,
+      "restartPolicy": "never",
+      "createdAt": "2026-08-26T22:32:51.8522373+08:00",
+      "updatedAt": "2026-08-26T22:43:10.885919152+08:00"
     }
   ]
 }
