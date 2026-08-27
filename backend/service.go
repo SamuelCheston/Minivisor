@@ -33,11 +33,15 @@ command="{{.ExecPath}}"
 command_args=""
 command_user="{{.User}}"
 command_background=true
-pidfile="/run/${RC_SVCNAME}.pid"
-working_directory="{{.WorkDir}}"
+pidfile="/run/${RC_SVCNAME}/${RC_SVCNAME}.pid"
+directory="{{.WorkDir}}"
 
 depend() {
 	need net
+}
+
+start_pre() {
+	checkpath -d -m 0755 -o "${command_user}:${command_user}" "/run/${RC_SVCNAME}"
 }
 `
 
@@ -138,26 +142,54 @@ func installOpenRC(config ServiceConfig) error {
 
 	fmt.Println("OpenRC init file installed successfully.")
 	fmt.Println("To enable and start the service, run:")
-	fmt.Println("  sudo rc-update add tinyvisor default")
-	fmt.Println("  sudo rc-service tinyvisor start")
+	if os.Geteuid() == 0 {
+		fmt.Println("  rc-update add tinyvisor default")
+		fmt.Println("  rc-service tinyvisor start")
+	} else {
+		fmt.Println("  sudo rc-update add tinyvisor default")
+		fmt.Println("  sudo rc-service tinyvisor start")
+	}
 
 	return nil
 }
 
 func checkAndCreateUser(username string) {
-	_, err := exec.LookPath("id")
-	if err != nil {
-		return
-	}
-
-	err = exec.Command("id", "-u", username).Run()
+	// Check if user exists
+	err := exec.Command("id", "-u", username).Run()
 	if err == nil {
 		fmt.Printf("User '%s' already exists.\n", username)
 		return
 	}
 
-	fmt.Printf("User '%s' does not exist. You might need to create it:\n", username)
-	fmt.Printf("  sudo useradd -r -s /bin/false %s\n", username)
+	// Try to create user if running as root
+	if os.Geteuid() == 0 {
+		fmt.Printf("Creating user '%s'...\n", username)
+
+		var cmd *exec.Cmd
+		if _, err := exec.LookPath("adduser"); err == nil {
+			// Alpine/Busybox style adduser
+			cmd = exec.Command("adduser", "-D", "-H", "-s", "/bin/false", username)
+		} else if _, err := exec.LookPath("useradd"); err == nil {
+			// Standard shadow-utils useradd
+			cmd = exec.Command("useradd", "-r", "-s", "/bin/false", username)
+		}
+
+		if cmd != nil {
+			if err := cmd.Run(); err == nil {
+				fmt.Printf("User '%s' created successfully.\n", username)
+				return
+			} else {
+				fmt.Printf("Failed to create user '%s': %v\n", username, err)
+			}
+		}
+	}
+
+	fmt.Printf("User '%s' does not exist. You might need to create it manually:\n", username)
+	if _, err := exec.LookPath("adduser"); err == nil {
+		fmt.Printf("  adduser -D -H -s /bin/false %s\n", username)
+	} else {
+		fmt.Printf("  sudo useradd -r -s /bin/false %s\n", username)
+	}
 }
 
 type ServiceStatus struct {
