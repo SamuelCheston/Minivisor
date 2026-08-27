@@ -13,15 +13,12 @@ import (
 	"math/big"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
-	"github.com/creack/pty"
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
 	"github.com/mattn/go-isatty"
@@ -103,8 +100,6 @@ type ManagedScript struct {
 	PID         int
 	StartedAt   *time.Time
 	Logs        []LogEntry
-	Cmd         *exec.Cmd
-	Pty         *os.File
 	Subscribers map[chan LogEntry]struct{}
 	Terminal    chan []byte
 	TermSubs    map[chan []byte]struct{}
@@ -116,6 +111,7 @@ type App struct {
 	configPath  string
 	storePath   string
 	scriptFiles string
+	screenMgr   *ScreenManager
 
 	mu       sync.RWMutex
 	scripts  map[string]*ManagedScript
@@ -227,11 +223,18 @@ func setupEnvironment() (Config, string, string, error) {
 }
 
 func newApp(config Config, storePath, scriptFiles string) (*App, error) {
+	daemonRoot := filepath.Dir(storePath)
+	screenMgr, err := NewScreenManager(filepath.Join(daemonRoot, "screen_sessions"))
+	if err != nil {
+		return nil, err
+	}
+
 	app := &App{
 		config:      config,
 		configPath:  filepath.Join(filepath.Dir(storePath), "..", configFileName),
 		storePath:   storePath,
 		scriptFiles: scriptFiles,
+		screenMgr:   screenMgr,
 		scripts:     make(map[string]*ManagedScript),
 		upgrader: websocket.Upgrader{
 			CheckOrigin: func(r *http.Request) bool {
@@ -260,13 +263,35 @@ func (a *App) loadScripts() error {
 		}
 	}
 
+	runningIDs, _ := a.screenMgr.ListRunning()
+	runningMap := make(map[string]bool)
+	for _, rid := range runningIDs {
+		runningMap[rid] = true
+	}
+
 	for _, storedScript := range store.Scripts {
+		status := "stopped"
+		var pid int
+		var startedAt *time.Time
+		if runningMap[storedScript.ID] {
+			status = "running"
+			pid, _ = a.screenMgr.GetPID(storedScript.ID)
+			now := time.Now()
+			startedAt = &now
+		}
+
 		a.scripts[storedScript.ID] = &ManagedScript{
 			Config:      storedScript,
-			Status:      "stopped",
+			Status:      status,
+			PID:         pid,
+			StartedAt:   startedAt,
 			Subscribers: make(map[chan LogEntry]struct{}),
 			TermSubs:    make(map[chan []byte]struct{}),
 			Logs:        []LogEntry{},
+		}
+
+		if status == "running" {
+			go a.watchProcess(storedScript.ID)
 		}
 	}
 
@@ -517,71 +542,38 @@ func (a *App) startScript(id string) (ScriptView, error) {
 		return ScriptView{}, err
 	}
 
-	cmd := exec.Command("bash", scriptPath)
-	cmd.Dir = item.Config.WorkDir
-	cmd.Env = os.Environ()
-
-	f, err := pty.Start(cmd)
+	// 使用 screen 启动
+	err := a.screenMgr.Start(id, item.Config.WorkDir, "bash "+scriptPath)
 	if err != nil {
 		a.mu.Unlock()
 		return ScriptView{}, err
 	}
 
+	pid, _ := a.screenMgr.GetPID(id)
 	now := time.Now()
-	item.Cmd = cmd
-	item.Pty = f
 	item.Status = "running"
-	item.PID = cmd.Process.Pid
+	item.PID = pid
 	item.StartedAt = &now
 	item.ManualStop = false
 	view := toScriptView(item)
 	a.mu.Unlock()
 
-	a.appendLog(id, "system", fmt.Sprintf("脚本已启动，PID=%d", view.PID))
-	go a.consumePty(id, f)
-	go a.watchProcess(id, cmd)
+	a.appendLog(id, "system", fmt.Sprintf("脚本已在 screen 中启动，PID=%d", view.PID))
+	go a.watchProcess(id)
 
 	return view, nil
 }
 
-func (a *App) consumePty(id string, f *os.File) {
-	defer f.Close()
+func (a *App) watchProcess(id string) {
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
 
-	buf := make([]byte, 4096)
-	for {
-		n, err := f.Read(buf)
-		if n > 0 {
-			data := make([]byte, n)
-			copy(data, buf[:n])
-
-			a.mu.Lock()
-			item, ok := a.scripts[id]
-			if ok {
-				// 广播 raw 字节流给终端订阅者
-				for sub := range item.TermSubs {
-					select {
-					case sub <- data:
-					default:
-					}
-				}
-
-				// 同时保留传统的行日志（用于历史查看）
-				// 注意：这里为了历史查看仍使用 Scanner 逻辑可能会导致体验不一致
-				// 但为了兼容，我们先只处理 raw 输出
-			}
-			a.mu.Unlock()
-		}
-		if err != nil {
-			if !errors.Is(err, os.ErrClosed) && !strings.Contains(err.Error(), "input/output error") {
-				a.appendLog(id, "system", fmt.Sprintf("PTY 读取失败: %v", err))
-			}
+	for range ticker.C {
+		running, err := a.screenMgr.IsRunning(id)
+		if err != nil || !running {
 			break
 		}
 	}
-}
-
-func (a *App) watchProcess(id string, cmd *exec.Cmd) {
-	err := cmd.Wait()
 
 	a.mu.Lock()
 	item, ok := a.scripts[id]
@@ -589,21 +581,15 @@ func (a *App) watchProcess(id string, cmd *exec.Cmd) {
 		a.mu.Unlock()
 		return
 	}
-	item.Cmd = nil
 	item.PID = 0
 	item.StartedAt = nil
 	item.Status = "stopped"
 
 	restartPolicy := item.Config.RestartPolicy
 	manualStop := item.ManualStop
-	exitError := err != nil
 	a.mu.Unlock()
 
-	if err != nil {
-		a.appendLog(id, "system", fmt.Sprintf("脚本退出，错误: %v", err))
-	} else {
-		a.appendLog(id, "system", "脚本已退出")
-	}
+	a.appendLog(id, "system", "脚本会话已结束")
 
 	shouldRestart := false
 	switch restartPolicy {
@@ -614,16 +600,13 @@ func (a *App) watchProcess(id string, cmd *exec.Cmd) {
 			shouldRestart = true
 		}
 	case RestartOnFailure:
-		if exitError {
-			shouldRestart = true
-		}
+		shouldRestart = true
 	}
 
 	if shouldRestart {
 		a.appendLog(id, "system", "根据重启策略，准备重启脚本...")
-		time.Sleep(2 * time.Second) // 延迟重启以防频繁崩溃
+		time.Sleep(2 * time.Second)
 
-		// 重启前再次检查是否已被手动停止或删除
 		a.mu.RLock()
 		item, ok := a.scripts[id]
 		if !ok || item.ManualStop {
@@ -638,22 +621,6 @@ func (a *App) watchProcess(id string, cmd *exec.Cmd) {
 	}
 }
 
-func (a *App) getRunningProcess(id string) (*exec.Cmd, ScriptView, error) {
-	a.mu.RLock()
-	defer a.mu.RUnlock()
-
-	item, ok := a.scripts[id]
-	if !ok {
-		return nil, ScriptView{}, errors.New("脚本不存在")
-	}
-	if item.Status != "running" || item.Cmd == nil || item.Cmd.Process == nil {
-		view := toScriptView(item)
-		return nil, view, errors.New("脚本当前未运行")
-	}
-
-	return item.Cmd, toScriptView(item), nil
-}
-
 func (a *App) stopScript(id string) (ScriptView, error) {
 	a.mu.Lock()
 	item, ok := a.scripts[id]
@@ -662,15 +629,14 @@ func (a *App) stopScript(id string) (ScriptView, error) {
 		return ScriptView{}, errors.New("脚本不存在")
 	}
 	item.ManualStop = true
-	cmd := item.Cmd
 	status := item.Status
 	view := toScriptView(item)
 	a.mu.Unlock()
 
 	a.appendLog(id, "system", "收到停止请求")
 
-	if status == "running" && cmd != nil && cmd.Process != nil {
-		if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
+	if status == "running" {
+		if err := a.screenMgr.Stop(id); err != nil {
 			return view, err
 		}
 	}
@@ -686,15 +652,14 @@ func (a *App) killScript(id string) (ScriptView, error) {
 		return ScriptView{}, errors.New("脚本不存在")
 	}
 	item.ManualStop = true
-	cmd := item.Cmd
 	status := item.Status
 	view := toScriptView(item)
 	a.mu.Unlock()
 
 	a.appendLog(id, "system", "收到强制结束请求")
 
-	if status == "running" && cmd != nil && cmd.Process != nil {
-		if err := cmd.Process.Kill(); err != nil {
+	if status == "running" {
+		if err := a.screenMgr.Kill(id); err != nil {
 			return view, err
 		}
 	}
@@ -710,10 +675,10 @@ func (a *App) waitUntilStopped(id string, timeout time.Duration) error {
 	for {
 		a.mu.RLock()
 		item, ok := a.scripts[id]
-		stopped := !ok || item.Status != "running"
+		status := item.Status
 		a.mu.RUnlock()
 
-		if stopped {
+		if !ok || status != "running" {
 			return nil
 		}
 		if time.Now().After(deadline) {
@@ -752,15 +717,40 @@ func (a *App) stopScriptAndWait(id string, forceAfterTimeout bool) (ScriptView, 
 
 func (a *App) getLogs(id string) ([]LogEntry, error) {
 	a.mu.RLock()
-	defer a.mu.RUnlock()
-
 	item, ok := a.scripts[id]
+	a.mu.RUnlock()
+
 	if !ok {
 		return nil, errors.New("脚本不存在")
 	}
 
-	logs := make([]LogEntry, len(item.Logs))
+	// 合并内存中的系统日志和文件中的终端日志
+	var logs []LogEntry
+	a.mu.RLock()
+	logs = make([]LogEntry, len(item.Logs))
 	copy(logs, item.Logs)
+	a.mu.RUnlock()
+
+	// 从 screen 日志文件中读取内容
+	screenLogs, _ := a.screenMgr.GetLogs(id)
+	for _, line := range screenLogs {
+		logs = append(logs, LogEntry{
+			Timestamp: time.Now(), // 我们不知道精确时间，暂时用现在的时间
+			Source:    "terminal",
+			Message:   line,
+		})
+	}
+
+	// 按时间排序
+	sort.Slice(logs, func(i, j int) bool {
+		return logs[i].Timestamp.Before(logs[j].Timestamp)
+	})
+
+	// 限制返回条数
+	if len(logs) > maxBufferedLogLines {
+		logs = logs[len(logs)-maxBufferedLogLines:]
+	}
+
 	return logs, nil
 }
 
@@ -825,7 +815,7 @@ func writeSSE(w io.Writer, entry LogEntry) error {
 func (a *App) handleTerminalWS(c *gin.Context) {
 	id := c.Param("id")
 	a.mu.RLock()
-	item, ok := a.scripts[id]
+	_, ok := a.scripts[id]
 	a.mu.RUnlock()
 
 	if !ok {
@@ -841,15 +831,12 @@ func (a *App) handleTerminalWS(c *gin.Context) {
 
 	// 订阅实时 raw 数据
 	subscriber := make(chan []byte, 128)
-	a.mu.Lock()
-	item.TermSubs[subscriber] = struct{}{}
-	a.mu.Unlock()
+	if err := a.screenMgr.Attach(id, subscriber); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "无法附加到终端: " + err.Error()})
+		return
+	}
 
-	defer func() {
-		a.mu.Lock()
-		delete(item.TermSubs, subscriber)
-		a.mu.Unlock()
-	}()
+	defer a.screenMgr.Detach(id, subscriber)
 
 	// 处理客户端输入
 	go func() {
@@ -867,27 +854,14 @@ func (a *App) handleTerminalWS(c *gin.Context) {
 					Rows int    `json:"rows"`
 				}
 				if err := json.Unmarshal(message, &input); err == nil {
-					a.mu.RLock()
-					script, ok := a.scripts[id]
-					if ok && script.Status == "running" && script.Pty != nil {
-						if input.Type == "input" {
-							_, _ = script.Pty.Write([]byte(input.Data))
-						} else if input.Type == "resize" && input.Cols > 0 && input.Rows > 0 {
-							_ = pty.Setsize(script.Pty, &pty.Winsize{
-								Cols: uint16(input.Cols),
-								Rows: uint16(input.Rows),
-							})
-						}
+					if input.Type == "input" {
+						_ = a.screenMgr.SendInput(id, []byte(input.Data))
+					} else if input.Type == "resize" && input.Cols > 0 && input.Rows > 0 {
+						_ = a.screenMgr.Resize(id, input.Cols, input.Rows)
 					}
-					a.mu.RUnlock()
 				} else {
 					// 如果不是 JSON，尝试作为 raw input 处理
-					a.mu.RLock()
-					script, ok := a.scripts[id]
-					if ok && script.Status == "running" && script.Pty != nil {
-						_, _ = script.Pty.Write(message)
-					}
-					a.mu.RUnlock()
+					_ = a.screenMgr.SendInput(id, message)
 				}
 			}
 		}
