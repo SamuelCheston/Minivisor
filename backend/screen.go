@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -246,4 +247,46 @@ func (sm *ScreenManager) GetLogs(id string) ([]string, error) {
 		lines = append(lines, scanner.Text())
 	}
 	return lines, scanner.Err()
+}
+
+func (sm *ScreenManager) GetRawLogs(id string, maxBytes int64) ([]byte, error) {
+	logFile := filepath.Join(sm.LogDir, id+".log")
+	info, err := os.Stat(logFile)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+
+	size := info.Size()
+	if size == 0 {
+		return nil, nil
+	}
+
+	readSize := size
+	if readSize > maxBytes {
+		readSize = maxBytes
+	}
+
+	f, err := os.Open(logFile)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+
+	if size > maxBytes {
+		_, err = f.Seek(size-maxBytes, 0)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	data := make([]byte, readSize)
+	_, err = io.ReadFull(f, data)
+	if err != nil && err != io.EOF && err != io.ErrUnexpectedEOF {
+		return nil, err
+	}
+
+	return data, nil
 }

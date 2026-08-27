@@ -829,6 +829,11 @@ func (a *App) handleTerminalWS(c *gin.Context) {
 	}
 	defer conn.Close()
 
+	// 发送历史日志记录
+	if rawLogs, err := a.screenMgr.GetRawLogs(id, 100*1024); err == nil && len(rawLogs) > 0 {
+		_ = conn.WriteMessage(websocket.BinaryMessage, rawLogs)
+	}
+
 	// 订阅实时 raw 数据
 	subscriber := make(chan []byte, 128)
 	if err := a.screenMgr.Attach(id, subscriber); err != nil {
