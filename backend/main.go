@@ -853,6 +853,7 @@ func (a *App) handleTerminalWS(c *gin.Context) {
 
 	// 处理客户端输入
 	go func() {
+		defer conn.Close()
 		for {
 			mt, message, err := conn.ReadMessage()
 			if err != nil {
@@ -896,6 +897,8 @@ func (a *App) handleTerminalWS(c *gin.Context) {
 			if err := conn.WriteMessage(websocket.TextMessage, data); err != nil {
 				return
 			}
+		case <-c.Request.Context().Done():
+			return
 		}
 	}
 }
