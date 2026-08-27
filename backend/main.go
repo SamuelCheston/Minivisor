@@ -829,13 +829,14 @@ func (a *App) handleTerminalWS(c *gin.Context) {
 	}
 	defer conn.Close()
 
-	// 发送历史日志记录
+	// 1. 发送历史日志记录
 	if rawLogs, err := a.screenMgr.GetRawLogs(id, 100*1024); err == nil && len(rawLogs) > 0 {
 		_ = conn.WriteMessage(websocket.BinaryMessage, rawLogs)
 	}
 
-	// 订阅实时 raw 数据
+	// 2. 订阅实时 raw 数据
 	subscriber := make(chan []byte, 128)
+	// Attach 会在内部处理日志记录
 	if err := a.screenMgr.Attach(id, subscriber); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "无法附加到终端: " + err.Error()})
 		return
@@ -843,7 +844,7 @@ func (a *App) handleTerminalWS(c *gin.Context) {
 
 	defer a.screenMgr.Detach(id, subscriber)
 
-	// 订阅系统日志
+	// 3. 订阅系统日志
 	sysSub := make(chan LogEntry, 32)
 	a.mu.Lock()
 	item.Subscribers[sysSub] = struct{}{}

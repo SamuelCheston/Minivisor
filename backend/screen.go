@@ -55,9 +55,10 @@ func (sm *ScreenManager) screenCmd(args ...string) *exec.Cmd {
 
 func (sm *ScreenManager) Start(id, workDir, command string) error {
 	logFile := filepath.Join(sm.LogDir, id+".log")
-	// -dmS: 启动一个分离的会话
-	// -L -Logfile: 开启日志记录
-	args := []string{"-dmS", id, "-L", "-Logfile", logFile, "bash", "-c", command}
+	// 使用传统的 PTY 模式启动
+	// 注意：我们直接在 shell 中使用 tee 来记录日志，这是最可靠的方式
+	wrappedCmd := fmt.Sprintf("bash -c '%s' 2>&1 | tee -a %s", command, logFile)
+	args := []string{"-dmS", id, "bash", "-c", wrappedCmd}
 	cmd := sm.screenCmd(args...)
 	cmd.Dir = workDir
 	return cmd.Run()

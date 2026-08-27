@@ -39,6 +39,16 @@
       "restartPolicy": "never",
       "createdAt": "2026-08-27T22:01:22.139649293+08:00",
       "updatedAt": "2026-08-27T22:01:22.139649293+08:00"
+    },
+    {
+      "id": "script-1787840673290224703",
+      "name": "Self Test",
+      "workDir": "/home/lnb/Minivisor",
+      "content": "echo \"Step 1: Init\"; sleep 1; echo \"Step 2: Done\"; while true; do date; sleep 5; done",
+      "autoStart": false,
+      "restartPolicy": "never",
+      "createdAt": "2026-08-27T22:24:33.290224658+08:00",
+      "updatedAt": "2026-08-27T22:24:33.290224658+08:00"
     }
   ]
 }

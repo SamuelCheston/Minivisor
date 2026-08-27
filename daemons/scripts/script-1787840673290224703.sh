@@ -1,0 +1,1 @@
+echo "Step 1: Init"; sleep 1; echo "Step 2: Done"; while true; do date; sleep 5; done
