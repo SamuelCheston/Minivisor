@@ -10,7 +10,7 @@ import (
 )
 
 func main() {
-	host := "192.168.1.105"
+	host := "192.168.1.133"
 	port := "22"
 	user := "root"
 	pass := "114514"
@@ -32,33 +32,15 @@ func main() {
 
 	fmt.Println("Connected to remote host.")
 
-	// Step 1: Install dependencies
-	fmt.Println("Installing dependencies...")
-	runCommand(client, "apk update && apk add bash ca-certificates shadow openssh-client")
-
-	// Step 2: Upload binary
-	fmt.Println("Uploading binary...")
-	runCommand(client, "rc-service tinyvisor stop || true")
-	runCommand(client, "killall tinyvisor || true")
-	runCommand(client, "mkdir -p /opt/tinyvisor")
-	runCommand(client, "rm -f /opt/tinyvisor/tinyvisor")
-	uploadFile(client, "../build/tinyvisor", "/opt/tinyvisor/tinyvisor")
-	runCommand(client, "chmod +x /opt/tinyvisor/tinyvisor")
-
-	// Step 3: Install service
-	fmt.Println("Installing service...")
-	runCommand(client, "/opt/tinyvisor/tinyvisor -service-install openrc")
-	runCommand(client, "chown -R tinyvisor:tinyvisor /opt/tinyvisor")
-	runCommand(client, "rc-update add tinyvisor default")
-	runCommand(client, "rc-service tinyvisor restart")
-
-	// Step 4: Check status
+	// Check status
 	fmt.Println("Checking service status...")
-	time.Sleep(2 * time.Second)
 	runCommand(client, "rc-service tinyvisor status")
+	runCommand(client, "ps aux | grep tinyvisor")
+	runCommand(client, "ls -lh /opt/tinyvisor/config.json")
 	runCommand(client, "cat /opt/tinyvisor/config.json")
+	runCommand(client, "netstat -tulpn | grep tinyvisor")
 
-	fmt.Println("Deployment complete.")
+	fmt.Println("Check complete.")
 }
 
 func runCommand(client *ssh.Client, cmd string) {
