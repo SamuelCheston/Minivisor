@@ -815,7 +815,7 @@ func writeSSE(w io.Writer, entry LogEntry) error {
 func (a *App) handleTerminalWS(c *gin.Context) {
 	id := c.Param("id")
 	a.mu.RLock()
-	_, ok := a.scripts[id]
+	item, ok := a.scripts[id]
 	a.mu.RUnlock()
 
 	if !ok {
@@ -843,6 +843,14 @@ func (a *App) handleTerminalWS(c *gin.Context) {
 
 	defer a.screenMgr.Detach(id, subscriber)
 
+	// 订阅系统日志
+	sysSub := make(chan LogEntry, 32)
+	a.mu.Lock()
+	item.Subscribers[sysSub] = struct{}{}
+	a.mu.Unlock()
+
+	defer a.unsubscribe(id, sysSub)
+
 	// 处理客户端输入
 	go func() {
 		for {
@@ -850,7 +858,6 @@ func (a *App) handleTerminalWS(c *gin.Context) {
 			if err != nil {
 				return
 			}
-
 			if mt == websocket.BinaryMessage || mt == websocket.TextMessage {
 				var input struct {
 					Type string `json:"type"`
@@ -865,16 +872,30 @@ func (a *App) handleTerminalWS(c *gin.Context) {
 						_ = a.screenMgr.Resize(id, input.Cols, input.Rows)
 					}
 				} else {
-					// 如果不是 JSON，尝试作为 raw input 处理
 					_ = a.screenMgr.SendInput(id, message)
 				}
 			}
 		}
 	}()
 
-	for data := range subscriber {
-		if err := conn.WriteMessage(websocket.BinaryMessage, data); err != nil {
-			break
+	// 合并发送
+	for {
+		select {
+		case data, ok := <-subscriber:
+			if !ok {
+				return
+			}
+			if err := conn.WriteMessage(websocket.BinaryMessage, data); err != nil {
+				return
+			}
+		case entry, ok := <-sysSub:
+			if !ok {
+				return
+			}
+			data, _ := json.Marshal(entry)
+			if err := conn.WriteMessage(websocket.TextMessage, data); err != nil {
+				return
+			}
 		}
 	}
 }

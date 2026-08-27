@@ -109,8 +109,17 @@ function TerminalView({ scriptId }: { scriptId: string }) {
     term.loadAddon(fitAddon)
     term.open(terminalRef.current)
     
-    // 延迟 fit 确保容器已完全渲染
-    setTimeout(() => fitAddon.fit(), 100)
+    // 立即执行一次 fit，然后延迟再执行一次以确保准确
+    try {
+      fitAddon.fit()
+    } catch (e) {}
+    
+    setTimeout(() => {
+      try {
+        fitAddon.fit()
+      } catch (e) {}
+    }, 64)
+
     xtermRef.current = term
 
     const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
