@@ -290,16 +290,22 @@ function App() {
   }
 
   async function loadScripts() {
-    const data = await fetchJson<{ scripts: Script[] }>('/api/scripts')
-    setScripts(data.scripts)
-    setNotice('后端已连接')
+    try {
+      const data = await fetchJson<{ scripts: Script[] }>('/api/scripts')
+      const scriptList = data?.scripts || []
+      setScripts(scriptList)
+      setNotice('后端已连接')
 
-    setSelectedId((current) => {
-      if (current && data.scripts.some((script) => script.id === current)) {
-        return current
-      }
-      return null
-    })
+      setSelectedId((current) => {
+        if (current && scriptList.some((script) => script.id === current)) {
+          return current
+        }
+        return null
+      })
+    } catch (err) {
+      console.error('Failed to load scripts:', err)
+      setNotice('加载脚本失败')
+    }
   }
 
   async function loadConfig() {
